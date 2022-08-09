@@ -40,12 +40,13 @@ def get_data_simple(df):
             df_aux = df.filter(regex=(string + "+\d"))
         df_output = pd.concat([df_output,df_aux], axis=1)
     df_output = df_output[ df_output['Flujo'] > 10]
+    df_output = df_output[ df_output['Current'] > 0]
     df_output.reset_index(drop=True,inplace=True)
     return df_output
 
 def compare(input, dataset_array, names):
     dict_var2spanish = {
-        'Current': 'la corriente que pasa a través de las celdas (I)', 'K': 'el factor de separación de las celdas (S)', 'Flujo': r'el flujo inicial de fluido ($F_{in}$)', 't_viento': r'la temperatura inicial de fluido ($T_{in}$)', 'Diametro': 'el diametro de celda (D)'
+        'Current': 'la corriente en las celdas (I)', 'K': 'el factor de separación (S)', 'Flujo': r'el flujo inicial ($F_{in}$)', 't_viento': r'la temperatura inicial ($T_{in}$)', 'Diametro': 'el diámetro de celda (D)'
     }
     dict_output2label = {
         'V': 'Velocidad [m/s]', 'P':'Presión [Pa]', 'TF': 'Temperatura [°C]','TC': 'Temperatura [°C]'
@@ -53,7 +54,9 @@ def compare(input, dataset_array, names):
     dict_output2title = {
         'V': 'Velocidad de fluido', 'P':'Presión de fluido', 'TF': 'Temperatura de fluido','TC': 'Temperatura de celda'
     }
-
+    dict_var2name = {
+        'Current': 'Corriente en las celdas (I)', 'K': 'Factor de separación (S)', 'Flujo': r'Flujo inicial ($F_{in}$)', 't_viento': r'Temperatura inicial ($T_{in}$)', 'Diametro': 'Diámetro de celda (D)'
+    }
     output_array = ['V', 'P', 'TF','TC']
 
     fig = plt.figure(constrained_layout=True, figsize=(len(dataset_array)*6, len(output_array)*4))
@@ -68,9 +71,9 @@ def compare(input, dataset_array, names):
             columns_to_plot = list(df_i_vs_o.columns)
             columns_to_plot.remove(input)
             df_i_vs_o.plot(x=input, y=columns_to_plot, ax=ax[j])
-            ax[j].set_title(names[j])
-            ax[j].set_xlabel(input)
-            ax[j].set_ylabel(dict_output2label[output_array[i]])
+            ax[j].set_title(names[j],fontsize=16)
+            ax[j].set_xlabel(dict_var2name[input],fontsize=14)
+            ax[j].set_ylabel(dict_output2label[output_array[i]],fontsize=14)
     plt.savefig('Compare/' + input + '.png')
 
 

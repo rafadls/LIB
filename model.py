@@ -3,10 +3,11 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from scipy import interpolate
 
+###############      Funciones de interpolación      #############
+
 def interpolate1d(x2predict, xtrain, ytrain):
     f = interpolate.interp1d(xtrain, ytrain, fill_value='extrapolate')
     return f(x2predict)
-    #return np.array(np.interp(x2predict, xtrain, ytrain))
 
 def q_conductividad(_t):
     _t += 273.15
@@ -30,21 +31,6 @@ def q_viscosidad(_t):
     np.place(_visc, np.isnan(_visc), 0)
     return _visc
 
-def q_paramdrag(_s):
-    _b1 = np.array([0.039, 0.028, 0.027, 0.028, 0.005])
-    _b2 = np.array([3.270, 2.416, 2.907, 2.974, 2.063])
-    _x = np.array([0.10, 0.25, 0.50, 0.75, 1.00])
-    _a1 = interpolate1d(_s, _x, _b1)
-    _a2 = interpolate1d(_s, _x, _b2)
-    if _s > _x[-1]:
-        _a1 = _b1[-1]
-        _a2 = _b2[-1]
-    if _a1 < 0:
-        _a1 = 0
-    if _a2 < 0:
-        _a2 = 0
-    return _a1, _a2
-
 def q_densidad(_t):
     _datos = np.array([1.293, 1.205, 1.127])
     _temp = np.array([0, 20, 40]) * 1.
@@ -59,6 +45,21 @@ def q_cp(_t):
     _cp = interpolate1d(_t, _temp, _datos)
     np.place(_cp, np.isnan(_cp), 1.0)
     return _cp
+
+###############       Ponderadores        ################
+
+def f_v(S,D):
+  return ((D--22.078451156303014)**0.13854518356399528*((S+-0.05273979112677948))**-0.4042472525258598)
+
+def f_tf(I,Fo):
+    output = (((34.861727563296036/Fo))**0.060547458674721236/(0.9882458698876305)**I)
+    return output
+
+def f_p(S,Fo):
+  return (((34.861727563296036/S))**0.060547458674721236/(0.9882458698876305)**Fo)
+
+def f_heat(S):
+  return 0.713711013825012*(S**2)-2.37719740945025*S+3.82926914078176
 
 class Model:
     def __init__(self, current=5, cellDiamater=26, separation=1, initFlow=100, \
@@ -78,7 +79,7 @@ class Model:
         self.R = 32 * 1e-3      # Resistencia interna [Ohm]
         self.largo = 65 * 1e-3  # Largo celdas        [m]
         self.e = 15 * 1e-3      # espacio pared-celda [m]
-        self.atmPressure = 0    # presion atmosferica [Pa]
+        self.referencePressure = 0    # presion de referencia [Pa]
         self.errmax = 1e-3      # error corte
         self.nmax = nmax        # Iteraciones fluodinamicas
 
@@ -92,164 +93,133 @@ class Model:
 
 
     def start(self):
+        print('comienzo start')
         # ------------------------- Inputs Conversion --------------------------------
         self.cellDiameter_m = self.cellDiameter / 1000  # Diametro Celda              [mm]->[m]
         self.initFlow_m3_sg = self.initFlow * 0.00047   # Flujo de entrada del fluido [CFM]->[m3/s]
 
         # --------------------- Fixed parameters ------------------------------
-        self.sp['piQuarter'] = np.pi / 4
         self.sp['doubleE'] = 2 * self.e
         self.sp['maxValue'] = np.finfo(np.float_).max
 
-        # -------------- Speedup cache variables
-        self.sp['cellArea'] = (self.cellDiameter_m ** 2) * self.sp['piQuarter']
-        self.sp['diamTimesZ'] = self.cellDiameter_m * self.largo  
-        self.sp['superficialArea'] = np.pi * self.cellDiameter_m * self.largo                # Area de la celda
-        self.sp['sPlusOne'] = self.separation + 1
-        self.sp['controlVolArea'] = self.sp['sPlusOne'] * self.cellDiameter_m * self.largo      # Area volumen control eje z
+        # Medidas importantes
+        self.sp['height'] = self.sp['doubleE'] + self.cellDiameter_m*(self.n_fluido + self.separation*self.n_celda)         # Altura del pack
+        self.sp['sTerm'] = self.separation / (self.separation + 1)
 
-        self.sp['qdot'] = (self.current**2) * self.R  # Flujo de Calor total corte
-        self.sp['height'] = self.sp['doubleE'] + self.cellDiameter_m * \
-                            (self.n_fluido + self.separation*self.n_celda)         # Altura del pack
-        self.sp['entranceArea'] = self.sp['height'] * self.largo                       # Area de entrada pack
-        self.sp['innerArg'] = self.initFlow_m3_sg/self.sp['entranceArea']
-        self.sp['sTerm'] = self.separation / self.sp['sPlusOne']
-        self.sp['heatPerArea'] = self.sp['qdot'] / self.sp['superficialArea']
-        self.sp['normalizedArea'] = self.sp['superficialArea'] / self.sp['controlVolArea']
+        # Áreas
+        self.sp['A_vol_in'] = self.separation * self.cellDiameter_m * self.largo     # Area de entrada al volumen de control
+        self.sp['A_cell_sec'] = self.cellDiameter_m * self.largo                           # Area de sombra de una celda
+        self.sp['A_battery_in'] = self.sp['height'] * self.largo                                # Area de entrada pack
+        self.sp['A_cell_manto'] = np.pi * self.cellDiameter_m * self.largo                   # Area de la celda (manto)
+   
+        # /********************** Condiciones de borde *****************************************/
+        v_in = self.initFlow_m3_sg/self.sp['A_battery_in']
+
+        self.sp['initVelocity'] = f_v(self.separation,self.cellDiameter) * v_in
+        self.sp['initTemperature'] = f_tf(self.current,self.initFlow) * self.initTemperature
+        self.sp['lastPressure'] = f_p(self.separation,self.initFlow) + self.referencePressure
+
+        # Cálculos de energía
+        self.sp['qdot_cell'] = (self.current**2) * self.R                                             # Flujo de Calor total celda
+        self.sp['qdot_vol'] = f_heat(self.separation) * self.sp['qdot_cell']                          # Flujo de Calor total volumen de control
+        self.sp['heatPerArea'] = self.sp['qdot_cell'] / self.sp['A_cell_manto']     
+        self.sp['m_punto'] = self.sp['A_vol_in'] * self.sp['initVelocity'] * q_densidad(self.sp['initTemperature']) # Flujo masico [kg/s] 
+        self.sp['fluidTempTerm'] = self.sp['qdot_vol'] / self.sp['m_punto']  
 
         # /********************** Initialization *****************************************/
-
-        self.vars_vec['tf'] = self.initTemperature * np.ones(self.col_fluido)      # [Degree C]
-        self.vars_vec['pf'] = self.atmPressure * np.ones(self.col_fluido)          # [Pa]
-        self.vars_vec['vf'] = self.sp['innerArg'] * np.ones(self.col_fluido)       # [m/s]
-        self.vars_vec['vmf'] = self.sp['innerArg'] * np.ones(self.col_fluido)      # [m/s]
-        self.vars_vec['df'] = 0.0 * np.ones(self.col_fluido)                       # [kg/m3]
-        self.vars_vec['df'][0] = q_densidad(self.initTemperature)                  # Condicion Borde
-        self.vars_vec['tc'] = self.initTemperature * np.ones(self.col_celda)       # [Degree C]
+        self.vars_vec['tf'] = self.sp['initTemperature'] * np.ones(self.col_fluido)      # [Degree C]
+        self.vars_vec['pf'] = self.sp['lastPressure'] * np.ones(self.col_fluido)          # [Pa]
+        self.vars_vec['vf'] = self.sp['initVelocity'] * np.ones(self.col_fluido)       # [m/s]
+        self.vars_vec['vmf'] = self.sp['initVelocity'] * self.sp['sTerm'] * np.ones(self.col_fluido)      # [m/s]
+        self.vars_vec['df'] = q_densidad(self.sp['initTemperature'])  * np.ones(self.col_fluido)                       # [kg/m3]
+        self.vars_vec['tc'] = self.sp['initTemperature'] * np.ones(self.col_celda)       # [Degree C]
         self.vars_vec['ff'] = 0.0 * np.ones(self.col_fluido)                       # [N]
-        self.vars_vec['rem'] = 1.0 * np.ones(self.col_fluido)                      # [adimensional]
-        self.vars_vec['prandtl'] = 0.0 * np.ones(self.col_fluido)                      # [adimensional]
+        self.vars_vec['rem'] = 1.0 * np.ones(self.col_celda)                       # [adimensional]
+        self.vars_vec['prandtl'] = 0.0 * np.ones(self.col_celda)                       # [adimensional]
 
-        self.vars_vec['cdrag'] = 0.0 * np.ones(self.col_fluido)                      # [adimensional]
-        self.vars_vec['frctionFactor'] = 0.0 * np.ones(self.col_fluido)                      # [adimensional]
-        self.vars_vec['nusselt'] = 0.0 * np.ones(self.col_fluido)                      # [adimensional]
+        self.vars_vec['cdrag'] = 0.0 * np.ones(self.col_celda)                      # [adimensional]
+        self.vars_vec['frctionFactor'] = 0.0 * np.ones(self.col_celda)                        # [adimensional]
+        self.vars_vec['nusselt'] = 0.0 * np.ones(self.col_celda)                        # [adimensional]
 
-        a1, a2 = q_paramdrag(self.separation)
-        a3 = 0.653
-        self.sp['a'] = np.array([a1, a2, a3])
-        self.sp['initVelocity'] = a2 * self.sp['innerArg']                        # Condicion Borde - Velocidad entrada[m/s]
-        self.sp['dfMultiplicationTerm'] = self.cellDiameter_m * self.largo  * self.sp['initVelocity'] * self.vars_vec['df'][0]
-        self.sp['m_punto'] = self.sp['sPlusOne'] * self.sp['dfMultiplicationTerm'] # Flujo masico [kg/s]
-        self.sp['initialFFTerm'] = 0.5 * self.sp['dfMultiplicationTerm'] * self.sp['initVelocity']
-        self.sp['fluidTempTerm'] = self.sp['qdot'] / self.sp['m_punto']
-
-        self.sp['cp'] = self.sp['qdot'] / self.sp['m_punto']
-
-        self.vars_vec['fluidK'] = q_conductividad(self.vars_vec['tf'][0]) * np.ones(self.col_fluido) # [W/m k]
+        self.vars_vec['fluidK'] = q_conductividad(self.vars_vec['tf'][0]) * np.ones(self.col_celda)  # [W/m k]
 
         # /********************** Errores en columnas ************************************/
         self.err_vec['cellTempError'] = self.sp['maxValue'] * np.ones(self.col_celda)
         self.err_vec['TFError'] = self.sp['maxValue'] * np.ones(self.col_fluido)
-        self.err_vec['TFError'][0] = 0.0
         self.err_vec['velocityError'] = self.sp['maxValue'] * np.ones(self.col_fluido)
         self.err_vec['pressureError'] = self.sp['maxValue'] * np.ones(self.col_celda)
+        self.err_vec['TFError'][0] = 0.0
+        self.err_vec['velocityError'][0] = 0.0
+        self.err_vec['pressureError'][-1] = 0.0
+
+        print('Vin: ' + str(self.sp['initVelocity']))
+        print('Tin: ' + str(self.sp['initTemperature']))
+        print('Plast: ' + str(self.sp['lastPressure']))
 
     def evolve(self):
+        print('comienzo evolve')
         for _ in range(self.nmax):
-            #  This gets updated with the first value from the last attempt to converge
-
-            #  **************************************** Calculo de la velocidad en 1 ***********************************
-            actualDF = self.vars_vec['df'][0]
-            normalizedDF = actualDF / 1.205
-            # param cdrag_tree:     inputs(5) (reynolds, separation, index, normalizedArea, normalizedDensity) 
-            cdrag = self.individual['computeDragCoefficient'](self.vars_vec['rem'][0],self.separation, 0, self.sp['normalizedArea'], normalizedDF) 
-            initialFF = self.sp['initialFFTerm'] * cdrag
-            self.vars_vec['ff'][0] = initialFF
-            actualVF = self.sp['initVelocity'] - initialFF / self.sp['m_punto']
-            self._setValue(self.vars_vec['vf'], 0, self.err_vec['velocityError'], actualVF)
-
-            # /*************************************** Calculo de la presion en 1 **************************************/
-            actualVMF = self.sp['sTerm'] * actualVF
-            self.vars_vec['vmf'][0] = actualVMF
-            actualRem = q_reynolds(actualVMF, self.vars_vec['tf'][0], self.cellDiameter_m , actualDF)
-            cp = q_cp(self.vars_vec['tf'][0])
-
-            self.vars_vec['prandtl'][0] = q_viscosidad(self.vars_vec['tf'][0]) * q_cp(self.vars_vec['tf'][0]) / q_conductividad(self.vars_vec['tf'][0])
-            self.vars_vec['rem'][0] = actualRem
-            # param ffriction_tree: inputs(5) (reynolds, separation, index, normalizedVelocity, normalizedDensity)
-            frictionFactor = self.individual['computeFrictionFactor'](actualRem, self.separation, 0, actualVMF / self.sp['initVelocity'], normalizedDF)
-            actualPF = self.vars_vec['pf'][1] + 0.5 * frictionFactor * actualDF * (actualVMF **2)
-            self._setValue(self.vars_vec['pf'], 0, self.err_vec['pressureError'], actualPF)
-            self.vars_vec['frctionFactor'][0] = frictionFactor
-
-            # Tf(0), pf(end), Df(0), vmf(end) and rem(0) aren't modified in the loop
-            # Loop iterating across columns (Note that, when col_fluido=2, it is just one iteration)
-
-            for i in range(self.col_fluido-1):
+            print(_)
+            for i in range(self.col_celda):
                 actualVF = self.vars_vec['vf'][i]
                 actualVMF = self.sp['sTerm'] * actualVF
                 self.vars_vec['vmf'][i] = actualVMF
                 actualTF = self.vars_vec['tf'][i]
+                nextTF = self.vars_vec['tf'][i]
+                actualTMF = (actualTF+nextTF)/2
                 actualDF = self.vars_vec['df'][i]
                 i2 = i+1
-                self.vars_vec['rem'][i2] = q_reynolds(actualVMF, actualTF, self.cellDiameter_m, actualDF)
-                self.vars_vec['prandtl'][i2] = q_viscosidad(actualTF) * q_cp(actualTF) / q_conductividad(actualTF)
+                self.vars_vec['rem'][i] = q_reynolds(actualVMF, actualTMF, self.cellDiameter_m, actualDF)
+                self.vars_vec['prandtl'][i] = q_viscosidad(actualTMF) * q_cp(actualTMF) / q_conductividad(actualTMF)
                 actualRem = self.vars_vec['rem'][i]
                 actualprandtl = self.vars_vec['prandtl'][i]
 
                 # ***************************************** Calculo de la presion **************************************
-                normalizedDF = actualDF / 1.205
-                # param ffriction_tree: inputs(5) (reynolds, separation, index, normalizedVelocity, normalizedDensity)
-                frictionFactor = self.individual['computeFrictionFactor'](actualRem, self.separation, 0, self.vars_vec['vmf'][i] / self.sp['initVelocity'], normalizedDF)
+                frictionFactor = self.individual['computeFrictionFactor'](actualRem, self.separation)
                 self.vars_vec['frctionFactor'][i] = frictionFactor
-                nextPF = self.vars_vec['pf'][i2] # nextPF -> pf en la col 2
-                # nextPF, presion en la salida, actualPF, presion en la entrada
+                nextPF = self.vars_vec['pf'][i2] 
                 actualPF = nextPF + 0.5 * frictionFactor * actualDF * (actualVMF ** 2)
                 self._setValue(self.vars_vec['pf'], i, self.err_vec['pressureError'], actualPF)
 
                 # ***************************************** Calculo de la velocidad ************************************
-                # param cdrag_tree:     inputs(5) (reynolds, separation, index, normalizedArea, normalizedDensity) 
-                cdrag = self.individual['computeDragCoefficient'](actualRem, self.separation, i, self.sp['normalizedArea'], normalizedDF)
+                cdrag = self.individual['computeDragCoefficient'](actualRem, self.separation)
                 self.vars_vec['cdrag'][i] = cdrag
                 actualVFSquared = (actualVF ** 2)
-                nextFF = 0.5 * self.cellDiameter_m * self.largo  * actualDF * actualVFSquared * cdrag
-                self.vars_vec['ff'][i2] = nextFF
-
-                # Conservacion de momento (arreglada, antes tenia velocidades al cuadrado)
-                nextVF = ((self.sp['controlVolArea'] * (actualPF - nextPF) - nextFF) / self.sp['m_punto']) + actualVF
-                # actualPF-nextPF ya que el delta de la memoria es P(i)-P(i+1)
-
+                actualVMFSquared = (actualVMF ** 2)
+                actualFF_cell = 0.5*self.sp['A_cell_sec']  * actualDF * actualVMFSquared * cdrag
+                actualFF_vol = 2*actualFF_cell
+                self.vars_vec['ff'][i] = actualFF_vol
+                nextVF = ((self.sp['A_vol_in'] * (actualPF - nextPF) - actualFF_vol) / self.sp['m_punto']) + actualVF
                 nextVFSquared = (nextVF ** 2)
                 self._setValue(self.vars_vec['vf'], i2, self.err_vec['velocityError'], nextVF)
 
                 # ********************************** Calculo de la temperatura fluido **********************************
-                cp = q_cp(actualTF)
-                # Conservacion de energia
-                nextTF = actualTF + (self.sp['fluidTempTerm'] - 0.5 * (nextVFSquared - actualVFSquared)) / cp
-                '''
-                print('fluidTempTerm: ' + str(self.sp['fluidTempTerm']))
-                print('cp: ' + str(cp))
-                print('qdot: ' + str(self.sp['qdot']))
-                print('m_punto: ' + str(self.sp['m_punto']))
-                print()
-                '''
-
+                nextTF = actualTF + (self.sp['fluidTempTerm'] - 0.5 * (nextVFSquared - actualVFSquared)) / q_cp(actualTMF)
                 self._setValue(self.vars_vec['tf'], i2, self.err_vec['TFError'], nextTF)
 
                 # ***************************************** Calculo de la densidad *************************************
-                self.vars_vec['df'][i2] = q_densidad(nextTF)
+                actualTMF = (actualTF+nextTF)/2
+                self.vars_vec['df'][i2] = q_densidad(actualTMF)
 
                 # ********************************** Calculo de temperatura de celda ************************************
-                # param nnusselt_tree:  inputs(4) (reynolds, prandtl, separation, index)
-                nu = self.individual['computeNusseltNumber'](actualRem, actualprandtl, self.separation, i) 
+                nu = self.individual['computeNusseltNumber'](actualRem, actualprandtl, self.separation) 
                 self.vars_vec['nusselt'][i] = nu
-                iniFluidK = q_conductividad(actualTF)
+                iniFluidK = q_conductividad(actualTMF)
                 self.vars_vec['fluidK'][i] = iniFluidK
                 h = nu * iniFluidK / self.cellDiameter_m # [W m^-2 K^-1]
-                # Transferencia de energia
-                self._setValue(self.vars_vec['tc'], i, self.err_vec['cellTempError'], self.sp['heatPerArea'] / h + (actualTF + nextTF) / 2)
+                self._setValue(self.vars_vec['tc'], i, self.err_vec['cellTempError'], self.sp['heatPerArea'] / h + actualTMF)
 
-            # If convergence, stop iterating
+            print('V   :'  +  str(self.vars_vec['vf']))
+            print('cdrag   :'  +  str(self.vars_vec['cdrag']))
+
+            print('P   :'  +  str(self.vars_vec['pf']))
+            print('frctionFactor   :'  +  str(self.vars_vec['frctionFactor']))
+
+            print('TF   :'  +  str(self.vars_vec['tf']))
+            print('TC   :'  +  str(self.vars_vec['tc']))
+            print('nusselt   :'  +  str(self.vars_vec['nusselt']))
+
+            # ********************************** If convergence, stop iterating ************************************
             flag1 = self.err_vec['cellTempError'].max() <= self.errmax
             flag2 = self.err_vec['TFError'].max() <= self.errmax
             flag3 = self.err_vec['pressureError'].max() <= self.errmax
@@ -259,11 +229,18 @@ class Model:
             if np.logical_and(flag12, flag34):
                 break
 
-        # Al final necesitamos guardar: velocidad a la salida (1), presion a la entrada (0), temperatura central (0)
+        if np.logical_and(flag12, flag34):
+            print('converge')
+        else:
+            print('no converge')
+        print('término evolve')
+        print()
+
+        # ********************************** Guardar ************************************
         results_dict = {}
-        results_dict['cdrag'] = self.vars_vec['cdrag'][:-1] 
-        results_dict['frctionFactor'] = self.vars_vec['frctionFactor'][:-1] 
-        results_dict['nusselt'] = self.vars_vec['nusselt'][:-1]
+        results_dict['cdrag'] = self.vars_vec['cdrag'] 
+        results_dict['frctionFactor'] = self.vars_vec['frctionFactor'] 
+        results_dict['nusselt'] = self.vars_vec['nusselt']
         results_dict['vf'] = self.vars_vec['vf']
         results_dict['pf'] = self.vars_vec['pf']
         results_dict['tc'] = self.vars_vec['tc']

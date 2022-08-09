@@ -14,7 +14,7 @@ from model import Model
 from Core.compare import *
 
 # Parámetros
-n_celdas = 53
+n_celdas = 74
 col_fluido=int((n_celdas+3)/7)
 col_celda=int(col_fluido-1)
 
@@ -24,10 +24,12 @@ col_celda=int(col_fluido-1)
 :param ffriction_tree: inputs(5) (reynolds, separation, index, normalizedVelocity, normalizedDensity)
 :param nnusselt_tree:  inputs(4) (reynolds, prandtl, separation, index)
 '''
-ind = [ lambda Rem, S, colIndex, An, Dfn: ((1.0088873146241906+1.0088873146241906)-0.9779848388629224/Rem**colIndex*0.9695729882078074**4-0.20426776058027882/S), \
-        lambda Rem, S, colIndex, Vmfn, Dfn: (((4/0.42090465711195396/S)-5.10833825923889)/(Rem**(0.6304577520319562*Vmfn))+2.273970569004207), \
-        lambda Rem, Prandtl, S, colIndex: Prandtl/((2.1418075044433764+3)*4-0.7144202949683599+colIndex+4.147131820064753*S+Prandtl) * (Rem**0.7375951897859169) * (Prandtl**-4.439518521269124)]
+# Individuo
+ind = [ lambda Re, S: 3.901/(S**0.365 * Re**0.096), \
+        lambda Re, S: 25.404/((S**1.154)*(Re**0.254)), \
+        lambda Re, Pr, S: (0.383 * S + 0.078)/S * (Re**0.64) * Pr]
 
+        
 # Data ANSYS 
 df_ansys = get_dataFrame('DATA/ANSYS/entradas_1_'+str(n_celdas)+'_celdas.csv')
 df_ansys = get_data_simple(df_ansys)
@@ -46,7 +48,7 @@ for i in range(col_fluido):
     df_mf['TC' + num_string] = None
 
 for index, row in df_mf.iterrows():
-  mdl = Model(current=row['Current'], cellDiamater=row['Diametro'], separation=row['K'], initFlow=row['Flujo'], initTemperature=row['t_viento'], col_fluido=col_fluido, col_celda=col_celda, n_fluido=4, n_celda=3, nmax=100)
+  mdl = Model(current=row['Current'], cellDiamater=row['Diametro'], separation=row['K'], initFlow=row['Flujo'], initTemperature=row['t_viento'], col_fluido=col_fluido, col_celda=col_celda, n_fluido=4, n_celda=3, nmax=10)
   mdl.load_individual(*ind)
   mdl.start()
   results_dict = mdl.evolve()
